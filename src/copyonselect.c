@@ -29,7 +29,7 @@ PLUGIN_VERSION_CHECK(GEANY_API_VERSION)
 
 PLUGIN_SET_INFO("Copy on Select",
                 "Automatically copies selected text to X selection for improved middle-click paste",
-                "1.01",
+                "1.02",
                 "Faster IT GmbH")
 
 /* Global variable to hold clipboard text */
@@ -79,15 +79,35 @@ static void reclaim_clipboard_ownership(void)
 
     /* Re-establish ownership with our callbacks */
     gtk_clipboard_set_with_data(clipboard, targets,
-                               G_N_ELEMENTS(targets),
-                               clipboard_get_func,
-                               clipboard_clear_func,
-                               NULL);
+                                G_N_ELEMENTS(targets),
+                                clipboard_get_func,
+                                clipboard_clear_func,
+                                NULL);
+}
+
+/* Callback when the current PRIMARY clipboard text is received.
+ * Reclaims PRIMARY ownership only if it is empty or still holds our text,
+ * so we don't overwrite selections made by other applications. */
+static void on_clipboard_text_received(GtkClipboard *clipboard,
+                                       const gchar *text, gpointer user_data)
+{
+    (void)clipboard;
+    (void)user_data;
+
+    if (clipboard_text == NULL)
+    {
+        return;
+    }
+
+    if (text == NULL || g_strcmp0(text, clipboard_text) == 0)
+    {
+        reclaim_clipboard_ownership();
+    }
 }
 
 /* Callback for editor notification events */
 static gboolean on_editor_notify(GObject *obj, GeanyEditor *editor,
-                                  SCNotification *nt, gpointer user_data)
+                                 SCNotification *nt, gpointer user_data)
 {
     /* Silence unused parameter warnings */
     (void)obj;
@@ -135,29 +155,14 @@ static gboolean on_editor_notify(GObject *obj, GeanyEditor *editor,
             {
                 clipboard = gtk_clipboard_get(GDK_SELECTION_PRIMARY);
 
-                /* Check if the PRIMARY clipboard still contains our text.
-                 * If it's different, another application has claimed it and we
-                 * should NOT overwrite it with our stored text. */
-                gchar *current_text = gtk_clipboard_wait_for_text(clipboard);
-
-                if (current_text != NULL)
-                {
-                    /* Compare the clipboard text with our stored text */
-                    gboolean is_our_text = (g_strcmp0(current_text, clipboard_text) == 0);
-                    g_free(current_text);
-
-                    /* Only reclaim if the clipboard still has our text */
-                    if (is_our_text)
-                    {
-                        reclaim_clipboard_ownership();
-                    }
-                }
-                else
-                {
-                    /* Clipboard is empty, safe to reclaim */
-                    reclaim_clipboard_ownership();
-                }
-
+                /* Check asynchronously whether the PRIMARY clipboard still
+                 * contains our text before reclaiming it. We do NOT use
+                 * gtk_clipboard_wait_for_text() here: it blocks on a nested
+                 * main loop and can freeze Geany when the clipboard owner is
+                 * slow or unresponsive. The callback runs inside the normal
+                 * main loop and only reclaims when it is safe to do so. */
+                gtk_clipboard_request_text(clipboard,
+                                           on_clipboard_text_received, NULL);
             }
         }
     }
